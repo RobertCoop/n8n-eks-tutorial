@@ -387,19 +387,105 @@ CERTIFICATE_ARN=$(aws acm request-certificate \
 
 echo "Certificate ARN: $CERTIFICATE_ARN"
 
-# Get validation records
-echo "Getting validation records..."
-VALIDATION_RECORD=$(aws acm describe-certificate \
-  --certificate-arn $CERTIFICATE_ARN \
-  --region $AWS_REGION \
-  --profile $AWS_PROFILE \
-  --query 'Certificate.DomainValidationOptions[0].ResourceRecord')
+# Wait for validation records to be available
+echo "Waiting for validation records to be generated..."
+MAX_ATTEMPTS=30
+ATTEMPT=0
+VALIDATION_RECORD=""
 
-echo "Validation record:"
-echo $VALIDATION_RECORD | jq .
+while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+    VALIDATION_RECORD=$(aws acm describe-certificate \
+      --certificate-arn $CERTIFICATE_ARN \
+      --region $AWS_REGION \
+      --profile $AWS_PROFILE \
+      --query 'Certificate.DomainValidationOptions[0].ResourceRecord' \
+      --output json 2>/dev/null || echo "")
+    
+    if [ ! -z "$VALIDATION_RECORD" ] && [ "$VALIDATION_RECORD" != "null" ]; then
+        break
+    fi
+    
+    ATTEMPT=$((ATTEMPT + 1))
+    echo -n "."
+    sleep 2
+done
 
 echo ""
-echo -e "${YELLOW}Please add the above DNS validation record to your Route53 hosted zone.${NC}"
+
+if [ -z "$VALIDATION_RECORD" ] || [ "$VALIDATION_RECORD" = "null" ]; then
+    echo -e "${RED}Error: Unable to retrieve validation records after $MAX_ATTEMPTS attempts.${NC}"
+    echo "Please check the certificate status in the AWS Console."
+    exit 1
+fi
+
+echo "Validation record retrieved successfully!"
+echo ""
+echo -e "${YELLOW}DNS Validation Record:${NC}"
+echo $VALIDATION_RECORD | jq .
+
+# Extract the DNS record details for easier reading
+RECORD_NAME=$(echo $VALIDATION_RECORD | jq -r '.Name')
+RECORD_VALUE=$(echo $VALIDATION_RECORD | jq -r '.Value')
+RECORD_TYPE=$(echo $VALIDATION_RECORD | jq -r '.Type')
+
+echo ""
+echo -e "${YELLOW}Please add the following DNS record to your Route53 hosted zone:${NC}"
+echo "Type: $RECORD_TYPE"
+echo "Name: $RECORD_NAME"
+echo "Value: $RECORD_VALUE"
+echo ""
+
+# Check if we should try to add the record automatically
+AUTO_ADD_DNS=false
+if [ "$CONFIRM" = true ]; then
+    # In confirm mode, try to add DNS record automatically
+    AUTO_ADD_DNS=true
+else
+    read -p "Would you like to try adding this record automatically to Route53? (y/n) " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        AUTO_ADD_DNS=true
+    fi
+fi
+
+if [ "$AUTO_ADD_DNS" = true ]; then
+    # Try to find the hosted zone
+    HOSTED_ZONE_ID=$(aws route53 list-hosted-zones \
+      --profile $AWS_PROFILE \
+      --query "HostedZones[?contains(Name, '${BASE_DOMAIN}.')].Id" \
+      --output text | awk -F'/' '{print $3}' | head -n1)
+    
+    if [ ! -z "$HOSTED_ZONE_ID" ]; then
+        echo "Found hosted zone: $HOSTED_ZONE_ID"
+        echo "Adding validation record..."
+        
+        cat > /tmp/validation-record.json <<EOF
+{
+  "Changes": [{
+    "Action": "UPSERT",
+    "ResourceRecordSet": {
+      "Name": "$RECORD_NAME",
+      "Type": "$RECORD_TYPE",
+      "TTL": 300,
+      "ResourceRecords": [{"Value": "\"$RECORD_VALUE\""}]
+    }
+  }]
+}
+EOF
+        
+        aws route53 change-resource-record-sets \
+          --hosted-zone-id $HOSTED_ZONE_ID \
+          --change-batch file:///tmp/validation-record.json \
+          --profile $AWS_PROFILE
+        
+        rm -f /tmp/validation-record.json
+        echo -e "${GREEN}Validation record added successfully!${NC}"
+    else
+        echo -e "${YELLOW}Could not find hosted zone for $BASE_DOMAIN. Please add the record manually.${NC}"
+    fi
+fi
+
+echo ""
 echo "Waiting for certificate validation (this may take a few minutes)..."
 
 # Wait for certificate to be validated
