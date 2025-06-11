@@ -15,6 +15,71 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Default values
+DEFAULT_CLUSTER_NAME="n8n"
+DEFAULT_AWS_REGION="us-east-1"
+DEFAULT_AWS_PROFILE="default"
+
+# Parse command line arguments
+CLUSTER_NAME=""
+AWS_REGION=""
+AWS_PROFILE=""
+DOMAIN_NAME=""
+CONFIRM=false
+
+show_help() {
+    echo "N8N on AWS EKS Setup Script"
+    echo ""
+    echo "Usage: $0 [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  --help                  Show this help message"
+    echo "  --cluster-name=NAME     EKS cluster name (default: $DEFAULT_CLUSTER_NAME)"
+    echo "  --aws-region=REGION     AWS region (default: $DEFAULT_AWS_REGION)"
+    echo "  --aws-profile=PROFILE   AWS CLI profile to use (default: $DEFAULT_AWS_PROFILE)"
+    echo "  --domain-name=DOMAIN    Domain name for n8n (required)"
+    echo "  --confirm               Skip confirmation prompts"
+    echo ""
+    echo "Example:"
+    echo "  $0 --cluster-name=my-n8n --aws-region=us-west-2 --domain-name=n8n.example.com --confirm"
+    echo ""
+    exit 0
+}
+
+# Parse arguments
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --help)
+            show_help
+            ;;
+        --cluster-name=*)
+            CLUSTER_NAME="${1#*=}"
+            shift
+            ;;
+        --aws-region=*)
+            AWS_REGION="${1#*=}"
+            shift
+            ;;
+        --aws-profile=*)
+            AWS_PROFILE="${1#*=}"
+            shift
+            ;;
+        --domain-name=*)
+            DOMAIN_NAME="${1#*=}"
+            shift
+            ;;
+        --confirm)
+            CONFIRM=true
+            shift
+            ;;
+        *)
+            echo -e "${RED}Unknown option: $1${NC}"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
 echo -e "${GREEN}N8N on AWS EKS Setup Script${NC}"
 echo "============================"
 echo ""
@@ -30,37 +95,75 @@ command -v jq >/dev/null 2>&1 || { echo -e "${RED}jq is required but not install
 echo -e "${GREEN}All required tools are installed.${NC}"
 echo ""
 
-# Get configuration values
-echo "Please provide the following configuration values:"
-read -p "Cluster name (default: n8n): " CLUSTER_NAME
-CLUSTER_NAME=${CLUSTER_NAME:-n8n}
+# Get configuration values (use defaults if not provided via CLI)
+if [ -z "$CLUSTER_NAME" ]; then
+    if [ "$CONFIRM" = true ]; then
+        CLUSTER_NAME=$DEFAULT_CLUSTER_NAME
+    else
+        read -p "Cluster name (default: $DEFAULT_CLUSTER_NAME): " CLUSTER_NAME
+        CLUSTER_NAME=${CLUSTER_NAME:-$DEFAULT_CLUSTER_NAME}
+    fi
+else
+    echo "Using cluster name from CLI: $CLUSTER_NAME"
+fi
 
-read -p "AWS Region (default: us-east-1): " AWS_REGION
-AWS_REGION=${AWS_REGION:-us-east-1}
+if [ -z "$AWS_REGION" ]; then
+    if [ "$CONFIRM" = true ]; then
+        AWS_REGION=$DEFAULT_AWS_REGION
+    else
+        read -p "AWS Region (default: $DEFAULT_AWS_REGION): " AWS_REGION
+        AWS_REGION=${AWS_REGION:-$DEFAULT_AWS_REGION}
+    fi
+else
+    echo "Using AWS region from CLI: $AWS_REGION"
+fi
 
-read -p "Your domain for n8n (e.g., n8n.example.com): " DOMAIN_NAME
+if [ -z "$AWS_PROFILE" ]; then
+    if [ "$CONFIRM" = true ]; then
+        AWS_PROFILE=$DEFAULT_AWS_PROFILE
+    else
+        read -p "AWS Profile (default: $DEFAULT_AWS_PROFILE): " AWS_PROFILE
+        AWS_PROFILE=${AWS_PROFILE:-$DEFAULT_AWS_PROFILE}
+    fi
+else
+    echo "Using AWS profile from CLI: $AWS_PROFILE"
+fi
+
 if [ -z "$DOMAIN_NAME" ]; then
-    echo -e "${RED}Domain name is required. Aborting.${NC}"
-    exit 1
+    if [ "$CONFIRM" = true ]; then
+        echo -e "${RED}Domain name is required. Please provide --domain-name parameter.${NC}"
+        exit 1
+    else
+        read -p "Your domain for n8n (e.g., n8n.example.com): " DOMAIN_NAME
+        if [ -z "$DOMAIN_NAME" ]; then
+            echo -e "${RED}Domain name is required. Aborting.${NC}"
+            exit 1
+        fi
+    fi
+else
+    echo "Using domain name from CLI: $DOMAIN_NAME"
 fi
 
 # Extract AWS Account ID
-AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --profile $AWS_PROFILE --query Account --output text)
 echo "AWS Account ID: $AWS_ACCOUNT_ID"
 
 echo ""
 echo -e "${YELLOW}Configuration Summary:${NC}"
 echo "Cluster Name: $CLUSTER_NAME"
 echo "AWS Region: $AWS_REGION"
+echo "AWS Profile: $AWS_PROFILE"
 echo "Domain: $DOMAIN_NAME"
 echo "AWS Account ID: $AWS_ACCOUNT_ID"
 echo ""
 
-read -p "Continue with these settings? (y/n) " -n 1 -r
-echo ""
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Setup cancelled."
-    exit 1
+if [ "$CONFIRM" != true ]; then
+    read -p "Continue with these settings? (y/n) " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Setup cancelled."
+        exit 1
+    fi
 fi
 
 # Step 1: Create EKS Cluster
@@ -68,7 +171,7 @@ echo ""
 echo -e "${GREEN}Step 1: Creating EKS Cluster...${NC}"
 
 # Check if cluster already exists
-CLUSTER_EXISTS=$(aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION --query 'cluster.name' --output text 2>/dev/null || echo "")
+CLUSTER_EXISTS=$(aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION --profile $AWS_PROFILE --query 'cluster.name' --output text 2>/dev/null || echo "")
 if [ -n "$CLUSTER_EXISTS" ]; then
     echo -e "${YELLOW}Cluster '$CLUSTER_NAME' already exists. Skipping cluster creation.${NC}"
 else
@@ -76,6 +179,7 @@ else
     eksctl create cluster \
       --name $CLUSTER_NAME \
       --region $AWS_REGION \
+      --profile $AWS_PROFILE \
       --node-type t3.medium \
       --nodes 2 \
       --nodes-min 1 \
@@ -85,7 +189,7 @@ fi
 
 # Verify cluster creation
 echo "Verifying cluster creation..."
-CLUSTER_STATUS=$(aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION --query 'cluster.status' --output text 2>/dev/null || echo "NOT_FOUND")
+CLUSTER_STATUS=$(aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION --profile $AWS_PROFILE --query 'cluster.status' --output text 2>/dev/null || echo "NOT_FOUND")
 if [ "$CLUSTER_STATUS" != "ACTIVE" ]; then
     echo -e "${RED}Error: Cluster creation failed or is not active. Status: $CLUSTER_STATUS${NC}"
     exit 1
@@ -93,7 +197,7 @@ fi
 
 # Verify nodegroup creation
 echo "Verifying nodegroup creation..."
-NODEGROUP_COUNT=$(eksctl get nodegroup --cluster $CLUSTER_NAME --region $AWS_REGION -o json | jq '. | length' 2>/dev/null || echo "0")
+NODEGROUP_COUNT=$(eksctl get nodegroup --cluster $CLUSTER_NAME --region $AWS_REGION --profile $AWS_PROFILE -o json | jq '. | length' 2>/dev/null || echo "0")
 if [ "$NODEGROUP_COUNT" -eq "0" ]; then
     echo -e "${RED}Error: No nodegroups found. Cluster creation incomplete.${NC}"
     echo "Please check CloudFormation console for any errors."
@@ -104,7 +208,7 @@ echo -e "${GREEN}Cluster and nodegroup created successfully!${NC}"
 
 # Update kubectl config
 echo "Updating kubectl configuration..."
-aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
+aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION --profile $AWS_PROFILE
 
 # Step 2: Install EBS CSI Driver
 echo ""
@@ -113,20 +217,23 @@ echo -e "${GREEN}Step 2: Installing EBS CSI Driver...${NC}"
 eksctl create addon \
   --name aws-ebs-csi-driver \
   --cluster $CLUSTER_NAME \
-  --region $AWS_REGION
+  --region $AWS_REGION \
+  --profile $AWS_PROFILE
 
 # Get the node instance role
 NODE_ROLE=$(aws eks describe-nodegroup \
   --cluster-name $CLUSTER_NAME \
-  --nodegroup-name $(eksctl get nodegroup --cluster $CLUSTER_NAME --region $AWS_REGION -o json | jq -r '.[0].Name') \
+  --nodegroup-name $(eksctl get nodegroup --cluster $CLUSTER_NAME --region $AWS_REGION --profile $AWS_PROFILE -o json | jq -r '.[0].Name') \
   --region $AWS_REGION \
+  --profile $AWS_PROFILE \
   --query 'nodegroup.nodeRole' \
   --output text | awk -F'/' '{print $NF}')
 
 # Attach EBS CSI policy to node role
 aws iam attach-role-policy \
   --role-name $NODE_ROLE \
-  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy \
+  --profile $AWS_PROFILE
 
 # Step 3: Associate OIDC Provider
 echo ""
@@ -135,6 +242,7 @@ echo -e "${GREEN}Step 3: Associating OIDC Provider...${NC}"
 eksctl utils associate-iam-oidc-provider \
   --region=$AWS_REGION \
   --cluster=$CLUSTER_NAME \
+  --profile=$AWS_PROFILE \
   --approve
 
 # Step 4: Create namespace
@@ -148,31 +256,34 @@ echo ""
 echo -e "${GREEN}Step 5: Creating IAM policies...${NC}"
 
 # Create AWS Load Balancer Controller policy
-if ! aws iam get-policy --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AWSLoadBalancerControllerIAMPolicy >/dev/null 2>&1; then
+if ! aws iam get-policy --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AWSLoadBalancerControllerIAMPolicy --profile $AWS_PROFILE >/dev/null 2>&1; then
     echo "Creating AWS Load Balancer Controller IAM policy..."
     aws iam create-policy \
       --policy-name AWSLoadBalancerControllerIAMPolicy \
-      --policy-document file://$PROJECT_ROOT/policies/aws-load-balancer-controller-iam-policy.json
+      --policy-document file://$PROJECT_ROOT/policies/aws-load-balancer-controller-iam-policy.json \
+      --profile $AWS_PROFILE
 else
     echo "AWS Load Balancer Controller IAM policy already exists"
 fi
 
 # Create External DNS policy
-if ! aws iam get-policy --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AllowExternalDNSUpdates >/dev/null 2>&1; then
+if ! aws iam get-policy --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AllowExternalDNSUpdates --profile $AWS_PROFILE >/dev/null 2>&1; then
     echo "Creating External DNS IAM policy..."
     aws iam create-policy \
       --policy-name AllowExternalDNSUpdates \
-      --policy-document file://$PROJECT_ROOT/policies/external-dns-policy.json
+      --policy-document file://$PROJECT_ROOT/policies/external-dns-policy.json \
+      --profile $AWS_PROFILE
 else
     echo "External DNS IAM policy already exists"
 fi
 
 # Create additional AWS Load Balancer Controller policy for SSL
-if ! aws iam get-policy --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AWSLoadBalancerControllerAdditionalPolicy >/dev/null 2>&1; then
+if ! aws iam get-policy --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AWSLoadBalancerControllerAdditionalPolicy --profile $AWS_PROFILE >/dev/null 2>&1; then
     echo "Creating additional AWS Load Balancer Controller IAM policy..."
     aws iam create-policy \
       --policy-name AWSLoadBalancerControllerAdditionalPolicy \
-      --policy-document file://$PROJECT_ROOT/policies/aws-load-balancer-controller-additional-policy.json
+      --policy-document file://$PROJECT_ROOT/policies/aws-load-balancer-controller-additional-policy.json \
+      --profile $AWS_PROFILE
 else
     echo "Additional AWS Load Balancer Controller IAM policy already exists"
 fi
@@ -189,6 +300,7 @@ eksctl create iamserviceaccount \
   --attach-policy-arn=arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AWSLoadBalancerControllerIAMPolicy \
   --override-existing-serviceaccounts \
   --region $AWS_REGION \
+  --profile $AWS_PROFILE \
   --approve
 
 # Attach additional policy for SSL support to AWS Load Balancer Controller
@@ -196,7 +308,8 @@ echo "Attaching additional policy to AWS Load Balancer Controller..."
 SERVICE_ACCOUNT_ROLE=$(kubectl get sa aws-load-balancer-controller -n kube-system -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' | awk -F'/' '{print $NF}')
 aws iam attach-role-policy \
   --role-name $SERVICE_ACCOUNT_ROLE \
-  --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AWSLoadBalancerControllerAdditionalPolicy
+  --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AWSLoadBalancerControllerAdditionalPolicy \
+  --profile $AWS_PROFILE
 
 # External DNS
 eksctl create iamserviceaccount \
@@ -205,6 +318,7 @@ eksctl create iamserviceaccount \
   --name=external-dns \
   --attach-policy-arn=arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AllowExternalDNSUpdates \
   --region $AWS_REGION \
+  --profile $AWS_PROFILE \
   --approve
 
 # Step 7: Install AWS Load Balancer Controller
@@ -218,6 +332,7 @@ helm repo update
 VPC_ID=$(aws eks describe-cluster \
   --name $CLUSTER_NAME \
   --region $AWS_REGION \
+  --profile $AWS_PROFILE \
   --query "cluster.resourcesVpcConfig.vpcId" \
   --output text)
 
@@ -266,6 +381,7 @@ CERTIFICATE_ARN=$(aws acm request-certificate \
   --domain-name "$DOMAIN_NAME" \
   --validation-method DNS \
   --region $AWS_REGION \
+  --profile $AWS_PROFILE \
   --query CertificateArn \
   --output text)
 
@@ -276,6 +392,7 @@ echo "Getting validation records..."
 VALIDATION_RECORD=$(aws acm describe-certificate \
   --certificate-arn $CERTIFICATE_ARN \
   --region $AWS_REGION \
+  --profile $AWS_PROFILE \
   --query 'Certificate.DomainValidationOptions[0].ResourceRecord')
 
 echo "Validation record:"
@@ -288,7 +405,8 @@ echo "Waiting for certificate validation (this may take a few minutes)..."
 # Wait for certificate to be validated
 aws acm wait certificate-validated \
   --certificate-arn $CERTIFICATE_ARN \
-  --region $AWS_REGION
+  --region $AWS_REGION \
+  --profile $AWS_PROFILE
 
 echo -e "${GREEN}Certificate is now validated!${NC}"
 

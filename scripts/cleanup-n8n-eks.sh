@@ -15,19 +15,102 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Default values
+DEFAULT_CLUSTER_NAME="n8n"
+DEFAULT_AWS_REGION="us-east-1"
+DEFAULT_AWS_PROFILE="default"
+
+# Parse command line arguments
+CLUSTER_NAME=""
+AWS_REGION=""
+AWS_PROFILE=""
+CONFIRM=false
+
+show_help() {
+    echo "N8N on AWS EKS Cleanup Script"
+    echo ""
+    echo "Usage: $0 [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  --help                  Show this help message"
+    echo "  --cluster-name=NAME     EKS cluster name to delete (default: $DEFAULT_CLUSTER_NAME)"
+    echo "  --aws-region=REGION     AWS region (default: $DEFAULT_AWS_REGION)"
+    echo "  --aws-profile=PROFILE   AWS CLI profile to use (default: $DEFAULT_AWS_PROFILE)"
+    echo "  --confirm               Skip confirmation prompts"
+    echo ""
+    echo "Example:"
+    echo "  $0 --cluster-name=my-n8n --aws-region=us-west-2 --confirm"
+    echo ""
+    exit 0
+}
+
+# Parse arguments
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --help)
+            show_help
+            ;;
+        --cluster-name=*)
+            CLUSTER_NAME="${1#*=}"
+            shift
+            ;;
+        --aws-region=*)
+            AWS_REGION="${1#*=}"
+            shift
+            ;;
+        --aws-profile=*)
+            AWS_PROFILE="${1#*=}"
+            shift
+            ;;
+        --confirm)
+            CONFIRM=true
+            shift
+            ;;
+        *)
+            echo -e "${RED}Unknown option: $1${NC}"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
 echo -e "${YELLOW}N8N on AWS EKS Cleanup Script${NC}"
 echo "================================"
 echo ""
 
-# Get configuration values
-read -p "Cluster name to delete (default: n8n): " CLUSTER_NAME
-CLUSTER_NAME=${CLUSTER_NAME:-n8n}
+# Get configuration values (use defaults if not provided via CLI)
+if [ -z "$CLUSTER_NAME" ]; then
+    if [ "$CONFIRM" = true ]; then
+        CLUSTER_NAME=$DEFAULT_CLUSTER_NAME
+    else
+        read -p "Cluster name to delete (default: $DEFAULT_CLUSTER_NAME): " CLUSTER_NAME
+        CLUSTER_NAME=${CLUSTER_NAME:-$DEFAULT_CLUSTER_NAME}
+    fi
+else
+    echo "Using cluster name from CLI: $CLUSTER_NAME"
+fi
 
-read -p "AWS Region (default: us-east-1): " AWS_REGION
-AWS_REGION=${AWS_REGION:-us-east-1}
+if [ -z "$AWS_REGION" ]; then
+    if [ "$CONFIRM" = true ]; then
+        AWS_REGION=$DEFAULT_AWS_REGION
+    else
+        read -p "AWS Region (default: $DEFAULT_AWS_REGION): " AWS_REGION
+        AWS_REGION=${AWS_REGION:-$DEFAULT_AWS_REGION}
+    fi
+else
+    echo "Using AWS region from CLI: $AWS_REGION"
+fi
 
-read -p "AWS Profile (default: default): " AWS_PROFILE
-AWS_PROFILE=${AWS_PROFILE:-default}
+if [ -z "$AWS_PROFILE" ]; then
+    if [ "$CONFIRM" = true ]; then
+        AWS_PROFILE=$DEFAULT_AWS_PROFILE
+    else
+        read -p "AWS Profile (default: $DEFAULT_AWS_PROFILE): " AWS_PROFILE
+        AWS_PROFILE=${AWS_PROFILE:-$DEFAULT_AWS_PROFILE}
+    fi
+else
+    echo "Using AWS profile from CLI: $AWS_PROFILE"
+fi
 
 # Get AWS Account ID
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --profile $AWS_PROFILE --query Account --output text)
@@ -36,16 +119,27 @@ echo ""
 echo -e "${YELLOW}Configuration Summary:${NC}"
 echo "Cluster Name: $CLUSTER_NAME"
 echo "AWS Region: $AWS_REGION"
+echo "AWS Profile: $AWS_PROFILE"
 echo "AWS Account ID: $AWS_ACCOUNT_ID"
 echo ""
 echo -e "${RED}WARNING: This will delete all resources associated with the n8n deployment!${NC}"
 echo ""
 
-read -p "Are you sure you want to continue? (yes/no) " -r
-echo ""
-if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
-    echo "Cleanup cancelled."
-    exit 1
+if [ "$CONFIRM" != true ]; then
+    read -p "Are you sure you want to continue? (yes/no) " -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
+        echo "Cleanup cancelled."
+        exit 1
+    fi
+fi
+
+# Check if kubectl is configured for the cluster
+echo "Checking kubectl configuration..."
+CURRENT_CONTEXT=$(kubectl config current-context 2>/dev/null || echo "")
+if [[ ! "$CURRENT_CONTEXT" =~ "$CLUSTER_NAME" ]]; then
+    echo "Updating kubectl configuration for cluster $CLUSTER_NAME..."
+    aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION --profile $AWS_PROFILE 2>/dev/null || echo "Cluster not accessible, continuing with cleanup..."
 fi
 
 # Step 1: Delete n8n resources
@@ -53,41 +147,41 @@ echo ""
 echo -e "${GREEN}Step 1: Deleting n8n Kubernetes resources...${NC}"
 
 # Delete resources in reverse order
-kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-service-configured.yaml -n n8n --ignore-not-found=true || \
-kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-service.yaml -n n8n --ignore-not-found=true
+kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-service-configured.yaml -n n8n --ignore-not-found=true 2>/dev/null || \
+kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-service.yaml -n n8n --ignore-not-found=true 2>/dev/null || true
 
-kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-deployment-configured.yaml -n n8n --ignore-not-found=true || \
-kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-deployment.yaml -n n8n --ignore-not-found=true
+kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-deployment-configured.yaml -n n8n --ignore-not-found=true 2>/dev/null || \
+kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-deployment.yaml -n n8n --ignore-not-found=true 2>/dev/null || true
 
-kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-claim0-persistentvolumeclaim.yaml -n n8n --ignore-not-found=true
-kubectl delete -f $PROJECT_ROOT/kubernetes/postgres/postgres-service.yaml -n n8n --ignore-not-found=true
-kubectl delete -f $PROJECT_ROOT/kubernetes/postgres/postgres-deployment.yaml -n n8n --ignore-not-found=true
-kubectl delete -f $PROJECT_ROOT/kubernetes/postgres/postgres-claim0-persistentvolumeclaim.yaml -n n8n --ignore-not-found=true
-kubectl delete -f $PROJECT_ROOT/kubernetes/postgres/postgres-configmap.yaml -n n8n --ignore-not-found=true
-kubectl delete secret postgres-secret -n n8n --ignore-not-found=true
+kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-claim0-persistentvolumeclaim.yaml -n n8n --ignore-not-found=true 2>/dev/null || true
+kubectl delete -f $PROJECT_ROOT/kubernetes/postgres/postgres-service.yaml -n n8n --ignore-not-found=true 2>/dev/null || true
+kubectl delete -f $PROJECT_ROOT/kubernetes/postgres/postgres-deployment.yaml -n n8n --ignore-not-found=true 2>/dev/null || true
+kubectl delete -f $PROJECT_ROOT/kubernetes/postgres/postgres-claim0-persistentvolumeclaim.yaml -n n8n --ignore-not-found=true 2>/dev/null || true
+kubectl delete -f $PROJECT_ROOT/kubernetes/postgres/postgres-configmap.yaml -n n8n --ignore-not-found=true 2>/dev/null || true
+kubectl delete secret postgres-secret -n n8n --ignore-not-found=true 2>/dev/null || true
 
 # Step 2: Delete External DNS
 echo ""
 echo -e "${GREEN}Step 2: Deleting External DNS...${NC}"
 
-kubectl delete -f $PROJECT_ROOT/kubernetes/external-dns-configured.yaml --ignore-not-found=true || \
-kubectl delete -f $PROJECT_ROOT/kubernetes/external-dns.yaml --ignore-not-found=true
+kubectl delete -f $PROJECT_ROOT/kubernetes/external-dns-configured.yaml --ignore-not-found=true 2>/dev/null || \
+kubectl delete -f $PROJECT_ROOT/kubernetes/external-dns.yaml --ignore-not-found=true 2>/dev/null || true
 
 # Step 3: Delete AWS Load Balancer Controller
 echo ""
 echo -e "${GREEN}Step 3: Deleting AWS Load Balancer Controller...${NC}"
 
-helm uninstall aws-load-balancer-controller -n kube-system || echo "AWS Load Balancer Controller not found"
+helm uninstall aws-load-balancer-controller -n kube-system 2>/dev/null || echo "AWS Load Balancer Controller not found"
 
 # Step 4: Delete namespace
 echo ""
 echo -e "${GREEN}Step 4: Deleting n8n namespace...${NC}"
 
-kubectl delete namespace n8n --ignore-not-found=true
+kubectl delete namespace n8n --ignore-not-found=true 2>/dev/null || true
 
-# Wait for namespace to be deleted
+# Wait for namespace to be deleted (with shorter timeout)
 echo "Waiting for namespace deletion to complete..."
-kubectl wait --for=delete namespace/n8n --timeout=60s || echo "Namespace already deleted"
+kubectl wait --for=delete namespace/n8n --timeout=60s 2>/dev/null || echo "Namespace deletion completed or timed out"
 
 # Step 5: Check for any remaining Load Balancers
 echo ""
@@ -97,7 +191,7 @@ LB_ARNS=$(aws elbv2 describe-load-balancers \
   --profile $AWS_PROFILE \
   --region $AWS_REGION \
   --query "LoadBalancers[?contains(LoadBalancerName, 'k8s-n8n-n8n')].LoadBalancerArn" \
-  --output text)
+  --output text 2>/dev/null || echo "")
 
 if [ ! -z "$LB_ARNS" ]; then
     echo "Found Load Balancers to delete:"
@@ -116,14 +210,14 @@ eksctl delete iamserviceaccount \
   --namespace=kube-system \
   --name=aws-load-balancer-controller \
   --profile=$AWS_PROFILE \
-  --region=$AWS_REGION || echo "Service account not found"
+  --region=$AWS_REGION 2>/dev/null || echo "Service account not found"
 
 eksctl delete iamserviceaccount \
   --cluster=$CLUSTER_NAME \
   --namespace=kube-system \
   --name=external-dns \
   --profile=$AWS_PROFILE \
-  --region=$AWS_REGION || echo "Service account not found"
+  --region=$AWS_REGION 2>/dev/null || echo "Service account not found"
 
 # Step 7: Delete EKS cluster
 echo ""
@@ -137,15 +231,26 @@ echo ""
 echo -e "${YELLOW}Optional: Delete IAM policies${NC}"
 echo "The following IAM policies can be deleted if not used by other clusters:"
 echo "- AWSLoadBalancerControllerIAMPolicy"
-echo "- AWSLoadBalancerControllerAdditionalPolicy"
+echo "- AWSLoadBalancerControllerAdditionalPolicy" 
 echo "- AllowExternalDNSUpdates"
 echo ""
-read -p "Do you want to delete these IAM policies? (yes/no) " -r
-echo ""
-if [[ $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
-    aws iam delete-policy --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AWSLoadBalancerControllerIAMPolicy --profile $AWS_PROFILE || echo "Policy not found"
-    aws iam delete-policy --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AWSLoadBalancerControllerAdditionalPolicy --profile $AWS_PROFILE || echo "Policy not found"
-    aws iam delete-policy --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AllowExternalDNSUpdates --profile $AWS_PROFILE || echo "Policy not found"
+
+DELETE_POLICIES=false
+if [ "$CONFIRM" = true ]; then
+    # In confirm mode, skip policy deletion by default
+    DELETE_POLICIES=false
+else
+    read -p "Do you want to delete these IAM policies? (yes/no) " -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
+        DELETE_POLICIES=true
+    fi
+fi
+
+if [ "$DELETE_POLICIES" = true ]; then
+    aws iam delete-policy --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AWSLoadBalancerControllerIAMPolicy --profile $AWS_PROFILE 2>/dev/null || echo "Policy not found or in use"
+    aws iam delete-policy --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AWSLoadBalancerControllerAdditionalPolicy --profile $AWS_PROFILE 2>/dev/null || echo "Policy not found or in use"
+    aws iam delete-policy --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AllowExternalDNSUpdates --profile $AWS_PROFILE 2>/dev/null || echo "Policy not found or in use"
 fi
 
 # Step 9: Clean up local files
