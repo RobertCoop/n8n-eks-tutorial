@@ -19,11 +19,13 @@ NC='\033[0m' # No Color
 DEFAULT_CLUSTER_NAME="n8n"
 DEFAULT_AWS_REGION="us-east-1"
 DEFAULT_AWS_PROFILE="default"
+DEFAULT_NAMESPACE="n8n"
 
 # Parse command line arguments
 CLUSTER_NAME=""
 AWS_REGION=""
 AWS_PROFILE=""
+NAMESPACE=""
 CONFIRM=false
 
 show_help() {
@@ -34,12 +36,13 @@ show_help() {
     echo "Options:"
     echo "  --help                  Show this help message"
     echo "  --cluster-name=NAME     EKS cluster name to delete (default: $DEFAULT_CLUSTER_NAME)"
+    echo "  --namespace=NAME        Kubernetes namespace for n8n (default: $DEFAULT_NAMESPACE)"
     echo "  --aws-region=REGION     AWS region (default: $DEFAULT_AWS_REGION)"
     echo "  --aws-profile=PROFILE   AWS CLI profile to use (default: $DEFAULT_AWS_PROFILE)"
     echo "  --confirm               Skip confirmation prompts"
     echo ""
     echo "Example:"
-    echo "  $0 --cluster-name=my-n8n --aws-region=us-west-2 --confirm"
+    echo "  $0 --cluster-name=my-n8n --namespace=production --aws-region=us-west-2 --confirm"
     echo ""
     exit 0
 }
@@ -60,6 +63,10 @@ while [ $# -gt 0 ]; do
             ;;
         --aws-profile=*)
             AWS_PROFILE="${1#*=}"
+            shift
+            ;;
+        --namespace=*)
+            NAMESPACE="${1#*=}"
             shift
             ;;
         --confirm)
@@ -112,12 +119,24 @@ else
     echo "Using AWS profile from CLI: $AWS_PROFILE"
 fi
 
+if [ -z "$NAMESPACE" ]; then
+    if [ "$CONFIRM" = true ]; then
+        NAMESPACE=$DEFAULT_NAMESPACE
+    else
+        read -p "Kubernetes namespace (default: $DEFAULT_NAMESPACE): " NAMESPACE
+        NAMESPACE=${NAMESPACE:-$DEFAULT_NAMESPACE}
+    fi
+else
+    echo "Using namespace from CLI: $NAMESPACE"
+fi
+
 # Get AWS Account ID
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --profile $AWS_PROFILE --query Account --output text)
 
 echo ""
 echo -e "${YELLOW}Configuration Summary:${NC}"
 echo "Cluster Name: $CLUSTER_NAME"
+echo "Namespace: $NAMESPACE"
 echo "AWS Region: $AWS_REGION"
 echo "AWS Profile: $AWS_PROFILE"
 echo "AWS Account ID: $AWS_ACCOUNT_ID"
@@ -147,18 +166,22 @@ echo ""
 echo -e "${GREEN}Step 1: Deleting n8n Kubernetes resources...${NC}"
 
 # Delete resources in reverse order
-kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-service-configured.yaml -n n8n --ignore-not-found=true 2>/dev/null || \
-kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-service.yaml -n n8n --ignore-not-found=true 2>/dev/null || true
+kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-service-configured.yaml -n $NAMESPACE --ignore-not-found=true 2>/dev/null || \
+kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-service.yaml -n $NAMESPACE --ignore-not-found=true 2>/dev/null || true
 
-kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-deployment-configured.yaml -n n8n --ignore-not-found=true 2>/dev/null || \
-kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-deployment.yaml -n n8n --ignore-not-found=true 2>/dev/null || true
+kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-deployment-configured.yaml -n $NAMESPACE --ignore-not-found=true 2>/dev/null || \
+kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-deployment.yaml -n $NAMESPACE --ignore-not-found=true 2>/dev/null || true
 
-kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-claim0-persistentvolumeclaim.yaml -n n8n --ignore-not-found=true 2>/dev/null || true
-kubectl delete -f $PROJECT_ROOT/kubernetes/postgres/postgres-service.yaml -n n8n --ignore-not-found=true 2>/dev/null || true
-kubectl delete -f $PROJECT_ROOT/kubernetes/postgres/postgres-deployment.yaml -n n8n --ignore-not-found=true 2>/dev/null || true
-kubectl delete -f $PROJECT_ROOT/kubernetes/postgres/postgres-claim0-persistentvolumeclaim.yaml -n n8n --ignore-not-found=true 2>/dev/null || true
-kubectl delete -f $PROJECT_ROOT/kubernetes/postgres/postgres-configmap.yaml -n n8n --ignore-not-found=true 2>/dev/null || true
-kubectl delete secret postgres-secret -n n8n --ignore-not-found=true 2>/dev/null || true
+kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-claim0-persistentvolumeclaim-configured.yaml -n $NAMESPACE --ignore-not-found=true 2>/dev/null || \
+kubectl delete -f $PROJECT_ROOT/kubernetes/n8n/n8n-claim0-persistentvolumeclaim.yaml -n $NAMESPACE --ignore-not-found=true 2>/dev/null || true
+
+# Delete postgres resources (both configured and original)
+for file in postgres-service postgres-deployment postgres-claim0-persistentvolumeclaim postgres-configmap; do
+    kubectl delete -f $PROJECT_ROOT/kubernetes/postgres/$file-configured.yaml -n $NAMESPACE --ignore-not-found=true 2>/dev/null || \
+    kubectl delete -f $PROJECT_ROOT/kubernetes/postgres/$file.yaml -n $NAMESPACE --ignore-not-found=true 2>/dev/null || true
+done
+
+kubectl delete secret postgres-secret -n $NAMESPACE --ignore-not-found=true 2>/dev/null || true
 
 # Step 2: Delete External DNS
 echo ""
@@ -175,22 +198,24 @@ helm uninstall aws-load-balancer-controller -n kube-system 2>/dev/null || echo "
 
 # Step 4: Delete namespace
 echo ""
-echo -e "${GREEN}Step 4: Deleting n8n namespace...${NC}"
+echo -e "${GREEN}Step 4: Deleting namespace $NAMESPACE...${NC}"
 
-kubectl delete namespace n8n --ignore-not-found=true 2>/dev/null || true
+kubectl delete namespace $NAMESPACE --ignore-not-found=true 2>/dev/null || true
 
 # Wait for namespace to be deleted (with shorter timeout)
 echo "Waiting for namespace deletion to complete..."
-kubectl wait --for=delete namespace/n8n --timeout=60s 2>/dev/null || echo "Namespace deletion completed or timed out"
+kubectl wait --for=delete namespace/$NAMESPACE --timeout=60s 2>/dev/null || echo "Namespace deletion completed or timed out"
 
 # Step 5: Check for any remaining Load Balancers
 echo ""
 echo -e "${GREEN}Step 5: Checking for remaining Load Balancers...${NC}"
 
+# Kubernetes load balancer names use the pattern k8s-<namespace>-<service>
+LB_PATTERN="k8s-${NAMESPACE}-n8n"
 LB_ARNS=$(aws elbv2 describe-load-balancers \
   --profile $AWS_PROFILE \
   --region $AWS_REGION \
-  --query "LoadBalancers[?contains(LoadBalancerName, 'k8s-n8n-n8n')].LoadBalancerArn" \
+  --query "LoadBalancers[?contains(LoadBalancerName, '${LB_PATTERN}')].LoadBalancerArn" \
   --output text 2>/dev/null || echo "")
 
 if [ ! -z "$LB_ARNS" ]; then
@@ -257,11 +282,15 @@ fi
 echo ""
 echo -e "${GREEN}Step 9: Cleaning up local configuration files...${NC}"
 
+rm -f $PROJECT_ROOT/kubernetes/namespace-configured.yaml
 rm -f $PROJECT_ROOT/kubernetes/external-dns-configured.yaml
 rm -f $PROJECT_ROOT/kubernetes/n8n/n8n-service-configured.yaml
 rm -f $PROJECT_ROOT/kubernetes/n8n/n8n-deployment-configured.yaml
+rm -f $PROJECT_ROOT/kubernetes/n8n/n8n-claim0-persistentvolumeclaim-configured.yaml
+rm -f $PROJECT_ROOT/kubernetes/postgres/*-configured.yaml
 rm -f $PROJECT_ROOT/kubernetes/*.yaml.bak $PROJECT_ROOT/kubernetes/n8n/*.yaml.bak $PROJECT_ROOT/kubernetes/postgres/*.yaml.bak
 rm -f $SCRIPT_DIR/password-output.txt
+rm -f /tmp/validation-record.json
 rm -f validation.json
 rm -f validation-record.json
 rm -f certificate-validation.json

@@ -19,12 +19,14 @@ NC='\033[0m' # No Color
 DEFAULT_CLUSTER_NAME="n8n"
 DEFAULT_AWS_REGION="us-east-1"
 DEFAULT_AWS_PROFILE="default"
+DEFAULT_NAMESPACE="n8n"
 
 # Parse command line arguments
 CLUSTER_NAME=""
 AWS_REGION=""
 AWS_PROFILE=""
 DOMAIN_NAME=""
+NAMESPACE=""
 CONFIRM=false
 
 show_help() {
@@ -35,13 +37,14 @@ show_help() {
     echo "Options:"
     echo "  --help                  Show this help message"
     echo "  --cluster-name=NAME     EKS cluster name (default: $DEFAULT_CLUSTER_NAME)"
+    echo "  --namespace=NAME        Kubernetes namespace for n8n (default: $DEFAULT_NAMESPACE)"
     echo "  --aws-region=REGION     AWS region (default: $DEFAULT_AWS_REGION)"
     echo "  --aws-profile=PROFILE   AWS CLI profile to use (default: $DEFAULT_AWS_PROFILE)"
     echo "  --domain-name=DOMAIN    Domain name for n8n (required)"
     echo "  --confirm               Skip confirmation prompts"
     echo ""
     echo "Example:"
-    echo "  $0 --cluster-name=my-n8n --aws-region=us-west-2 --domain-name=n8n.example.com --confirm"
+    echo "  $0 --cluster-name=my-n8n --namespace=production --aws-region=us-west-2 --domain-name=n8n.example.com --confirm"
     echo ""
     exit 0
 }
@@ -66,6 +69,10 @@ while [ $# -gt 0 ]; do
             ;;
         --domain-name=*)
             DOMAIN_NAME="${1#*=}"
+            shift
+            ;;
+        --namespace=*)
+            NAMESPACE="${1#*=}"
             shift
             ;;
         --confirm)
@@ -144,6 +151,17 @@ else
     echo "Using domain name from CLI: $DOMAIN_NAME"
 fi
 
+if [ -z "$NAMESPACE" ]; then
+    if [ "$CONFIRM" = true ]; then
+        NAMESPACE=$DEFAULT_NAMESPACE
+    else
+        read -p "Kubernetes namespace (default: $DEFAULT_NAMESPACE): " NAMESPACE
+        NAMESPACE=${NAMESPACE:-$DEFAULT_NAMESPACE}
+    fi
+else
+    echo "Using namespace from CLI: $NAMESPACE"
+fi
+
 # Extract AWS Account ID
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --profile $AWS_PROFILE --query Account --output text)
 echo "AWS Account ID: $AWS_ACCOUNT_ID"
@@ -151,6 +169,7 @@ echo "AWS Account ID: $AWS_ACCOUNT_ID"
 echo ""
 echo -e "${YELLOW}Configuration Summary:${NC}"
 echo "Cluster Name: $CLUSTER_NAME"
+echo "Namespace: $NAMESPACE"
 echo "AWS Region: $AWS_REGION"
 echo "AWS Profile: $AWS_PROFILE"
 echo "Domain: $DOMAIN_NAME"
@@ -247,9 +266,17 @@ eksctl utils associate-iam-oidc-provider \
 
 # Step 4: Create namespace
 echo ""
-echo -e "${GREEN}Step 4: Creating n8n namespace...${NC}"
+echo -e "${GREEN}Step 4: Creating namespace $NAMESPACE...${NC}"
 
-kubectl apply -f $PROJECT_ROOT/kubernetes/namespace.yaml
+# Create namespace configuration from template
+cat > $PROJECT_ROOT/kubernetes/namespace-configured.yaml <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $NAMESPACE
+EOF
+
+kubectl apply -f $PROJECT_ROOT/kubernetes/namespace-configured.yaml
 
 # Step 5: Create IAM policies
 echo ""
@@ -356,6 +383,7 @@ echo -e "${GREEN}Step 8: Updating configuration files...${NC}"
 cp $PROJECT_ROOT/kubernetes/external-dns.yaml $PROJECT_ROOT/kubernetes/external-dns-configured.yaml
 cp $PROJECT_ROOT/kubernetes/n8n/n8n-service.yaml $PROJECT_ROOT/kubernetes/n8n/n8n-service-configured.yaml
 cp $PROJECT_ROOT/kubernetes/n8n/n8n-deployment.yaml $PROJECT_ROOT/kubernetes/n8n/n8n-deployment-configured.yaml
+cp $PROJECT_ROOT/kubernetes/n8n/n8n-claim0-persistentvolumeclaim.yaml $PROJECT_ROOT/kubernetes/n8n/n8n-claim0-persistentvolumeclaim-configured.yaml
 
 # Extract base domain from full domain name (e.g., quellant.com from n8n-tutorial.quellant.com)
 BASE_DOMAIN=$(echo "$DOMAIN_NAME" | sed 's/^[^.]*\.//')
@@ -366,6 +394,11 @@ sed -i "s/<CLUSTER_NAME>/$CLUSTER_NAME/g" $PROJECT_ROOT/kubernetes/external-dns-
 
 # Remove ServiceAccount section from external-dns-configured.yaml
 sed -i '/^apiVersion: v1$/,/^---$/d' $PROJECT_ROOT/kubernetes/external-dns-configured.yaml
+
+# Update namespace in n8n files
+sed -i "s/namespace: n8n/namespace: $NAMESPACE/g" $PROJECT_ROOT/kubernetes/n8n/n8n-service-configured.yaml
+sed -i "s/namespace: n8n/namespace: $NAMESPACE/g" $PROJECT_ROOT/kubernetes/n8n/n8n-deployment-configured.yaml
+sed -i "s/namespace: n8n/namespace: $NAMESPACE/g" $PROJECT_ROOT/kubernetes/n8n/n8n-claim0-persistentvolumeclaim-configured.yaml
 
 # Deploy External DNS
 echo "Deploying External DNS..."
@@ -515,7 +548,7 @@ POSTGRES_PASSWORD=$(openssl rand -base64 20)
 N8N_PASSWORD=$(openssl rand -base64 20)
 
 kubectl create secret generic postgres-secret \
-  --namespace=n8n \
+  --namespace=$NAMESPACE \
   --from-literal=POSTGRES_USER=postgres \
   --from-literal=POSTGRES_PASSWORD=$POSTGRES_PASSWORD \
   --from-literal=POSTGRES_DB=n8n \
@@ -526,26 +559,35 @@ kubectl create secret generic postgres-secret \
 echo ""
 echo -e "${GREEN}Step 11: Deploying n8n...${NC}"
 
+# Update all YAML files with the correct namespace
+echo "Updating Kubernetes manifests with namespace $NAMESPACE..."
+
+# Create postgres configs with namespace
+for file in $PROJECT_ROOT/kubernetes/postgres/*.yaml; do
+    filename=$(basename "$file")
+    sed "s/namespace: n8n/namespace: $NAMESPACE/g" "$file" > "$PROJECT_ROOT/kubernetes/postgres/${filename%.yaml}-configured.yaml"
+done
+
 # Apply all configurations
-kubectl apply -f $PROJECT_ROOT/kubernetes/postgres/postgres-configmap.yaml
-kubectl apply -f $PROJECT_ROOT/kubernetes/postgres/postgres-claim0-persistentvolumeclaim.yaml
-kubectl apply -f $PROJECT_ROOT/kubernetes/postgres/postgres-deployment.yaml
-kubectl apply -f $PROJECT_ROOT/kubernetes/postgres/postgres-service.yaml
-kubectl apply -f $PROJECT_ROOT/kubernetes/n8n/n8n-claim0-persistentvolumeclaim.yaml
+kubectl apply -f $PROJECT_ROOT/kubernetes/postgres/postgres-configmap-configured.yaml
+kubectl apply -f $PROJECT_ROOT/kubernetes/postgres/postgres-claim0-persistentvolumeclaim-configured.yaml
+kubectl apply -f $PROJECT_ROOT/kubernetes/postgres/postgres-deployment-configured.yaml
+kubectl apply -f $PROJECT_ROOT/kubernetes/postgres/postgres-service-configured.yaml
+kubectl apply -f $PROJECT_ROOT/kubernetes/n8n/n8n-claim0-persistentvolumeclaim-configured.yaml
 kubectl apply -f $PROJECT_ROOT/kubernetes/n8n/n8n-deployment-configured.yaml
 kubectl apply -f $PROJECT_ROOT/kubernetes/n8n/n8n-service-configured.yaml
 
 # Wait for pods to be ready
 echo "Waiting for pods to be ready..."
-kubectl wait --for=condition=ready pod -l service=postgres-n8n -n n8n --timeout=120s || {
+kubectl wait --for=condition=ready pod -l service=postgres-n8n -n $NAMESPACE --timeout=120s || {
     echo "Postgres pod not ready after 120s. Checking pod status..."
-    kubectl get pods -n n8n -l service=postgres-n8n
-    kubectl describe pod -n n8n -l service=postgres-n8n | tail -20
+    kubectl get pods -n $NAMESPACE -l service=postgres-n8n
+    kubectl describe pod -n $NAMESPACE -l service=postgres-n8n | tail -20
 }
-kubectl wait --for=condition=ready pod -l service=n8n -n n8n --timeout=120s || {
+kubectl wait --for=condition=ready pod -l service=n8n -n $NAMESPACE --timeout=120s || {
     echo "n8n pod not ready after 120s. Checking pod status..."
-    kubectl get pods -n n8n -l service=n8n
-    kubectl describe pod -n n8n -l service=n8n | tail -20
+    kubectl get pods -n $NAMESPACE -l service=n8n
+    kubectl describe pod -n $NAMESPACE -l service=n8n | tail -20
 }
 
 echo ""
@@ -553,7 +595,7 @@ echo -e "${GREEN}Deployment complete!${NC}"
 echo ""
 echo "Next steps:"
 echo "1. Wait for the Load Balancer to be provisioned (2-3 minutes)"
-echo "   Check status: kubectl get svc n8n -n n8n"
+echo "   Check status: kubectl get svc n8n -n $NAMESPACE"
 echo ""
 echo "2. Once the Load Balancer is ready, External DNS will create the DNS record"
 echo "   This may take 5-10 minutes"
@@ -561,6 +603,6 @@ echo ""
 echo "3. Access your n8n instance at: https://$DOMAIN_NAME"
 echo ""
 echo "Useful commands:"
-echo "- Check pod status: kubectl get pods -n n8n"
-echo "- View logs: kubectl logs -n n8n deployment/n8n"
-echo "- Get load balancer URL: kubectl get svc n8n -n n8n"
+echo "- Check pod status: kubectl get pods -n $NAMESPACE"
+echo "- View logs: kubectl logs -n $NAMESPACE deployment/n8n"
+echo "- Get load balancer URL: kubectl get svc n8n -n $NAMESPACE"
