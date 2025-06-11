@@ -500,7 +500,7 @@ if [ "$AUTO_ADD_DNS" = true ]; then
       "Name": "$RECORD_NAME",
       "Type": "$RECORD_TYPE",
       "TTL": 300,
-      "ResourceRecords": [{"Value": "\"$RECORD_VALUE\""}]
+      "ResourceRecords": [{"Value": "$RECORD_VALUE"}]
     }
   }]
 }
