@@ -54,7 +54,7 @@ This deployment guide sets up a production-ready n8n instance on AWS EKS with:
 ```
 n8n-eks-tutorial/
 ├── README.md                       # This guide
-├── LICENSE                         # License information
+├── LICENSE                         # Public domain dedication
 ├── docs/                          # Additional documentation
 │   ├── TROUBLESHOOTING.md         # Common issues and solutions
 │   └── kubernetes/                # Kubernetes-specific documentation
@@ -976,7 +976,7 @@ Contributions are welcome! Please:
 
 ## License
 
-This project is licensed under the MIT License. See the LICENSE file for details.
+This project is released into the public domain. See the LICENSE file for details.
 
 ## Additional Resources
 
