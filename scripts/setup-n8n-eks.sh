@@ -249,7 +249,7 @@ eksctl utils associate-iam-oidc-provider \
 echo ""
 echo -e "${GREEN}Step 4: Creating n8n namespace...${NC}"
 
-kubectl create namespace n8n || echo "Namespace already exists"
+kubectl apply -f $PROJECT_ROOT/kubernetes/namespace.yaml
 
 # Step 5: Create IAM policies
 echo ""
@@ -527,7 +527,6 @@ echo ""
 echo -e "${GREEN}Step 11: Deploying n8n...${NC}"
 
 # Apply all configurations
-kubectl apply -f $PROJECT_ROOT/kubernetes/namespace.yaml
 kubectl apply -f $PROJECT_ROOT/kubernetes/postgres/postgres-configmap.yaml
 kubectl apply -f $PROJECT_ROOT/kubernetes/postgres/postgres-claim0-persistentvolumeclaim.yaml
 kubectl apply -f $PROJECT_ROOT/kubernetes/postgres/postgres-deployment.yaml
@@ -538,8 +537,16 @@ kubectl apply -f $PROJECT_ROOT/kubernetes/n8n/n8n-service-configured.yaml
 
 # Wait for pods to be ready
 echo "Waiting for pods to be ready..."
-kubectl wait --for=condition=ready pod -l service=postgres -n n8n --timeout=120s
-kubectl wait --for=condition=ready pod -l service=n8n -n n8n --timeout=120s
+kubectl wait --for=condition=ready pod -l service=postgres-n8n -n n8n --timeout=120s || {
+    echo "Postgres pod not ready after 120s. Checking pod status..."
+    kubectl get pods -n n8n -l service=postgres-n8n
+    kubectl describe pod -n n8n -l service=postgres-n8n | tail -20
+}
+kubectl wait --for=condition=ready pod -l service=n8n -n n8n --timeout=120s || {
+    echo "n8n pod not ready after 120s. Checking pod status..."
+    kubectl get pods -n n8n -l service=n8n
+    kubectl describe pod -n n8n -l service=n8n | tail -20
+}
 
 echo ""
 echo -e "${GREEN}Deployment complete!${NC}"
