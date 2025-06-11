@@ -1,0 +1,58 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# AWS credentials
+.aws/
+aws-config
+credentials
+
+# Kubernetes configs
+kubeconfig
+*.kubeconfig
+
+# Secrets and sensitive data
+*-secret.yaml
+*-secrets.yaml
+secrets/
+passwords.txt
+password-output.txt
+
+# Backup files
+*.bak
+*.backup
+*.sql
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+logs/
+
+# Terraform state (if using Terraform)
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Helm charts
+*.tgz
+charts/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Generated files
+n8n-diagnostics-*/
+*.tar.gz
+
+# Local test files
+test/
+testing/
